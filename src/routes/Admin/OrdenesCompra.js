@@ -340,7 +340,7 @@ router.get("/admin/oc/companias", async (_req, res) => {
     const { rows } = await pool.query(`
       SELECT id_compania, codigo_compania, nombre_compania
       FROM doa2.companias
-      WHERE estado_registro = 'A'
+      WHERE estado_registro = 'A' 
       ORDER BY nombre_compania ASC
     `);
     res.json({ ok: true, rows });
