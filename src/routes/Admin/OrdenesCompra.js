@@ -48,48 +48,70 @@ router.get("/admin/oc", async (req, res) => {
       return `$${params.length}`;
     };
 
+    // ACTIVAS: resolvemos CC directo por id
     const baseActivas = `
       SELECT
-        'ACTIVA'                AS fuente,
-        c.id_cabe               AS id_cabecera,
-        c.numero_solicitud      AS numero_solicitud,
-        c.numero_orden_compra   AS numero_oc,
-        c.fecha_orden_compra    AS fecha_oc,
-        c.nombre_proveedor      AS proveedor,
-        c.total_neto::float8    AS total_neto,
-        c.estado_oc_id_esta     AS id_estado,
-        e.descripcion           AS estado,
-        c.centro_costo_id_ceco  AS id_ceco,
-        NULL::text              AS ceco_txt,
-        c.compania              AS compania,
-        c.prioridad_orden       AS prioridad,
-        c.sistema               AS sistema,
-        c.solicitante           AS solicitante,
-        c.fecha_creacion        AS fecha_creacion
+        'ACTIVA'                                  AS fuente,
+        c.id_cabe                                 AS id_cabecera,
+        c.numero_solicitud                        AS numero_solicitud,
+        c.numero_orden_compra                     AS numero_oc,
+        c.fecha_orden_compra                      AS fecha_oc,
+        c.nombre_proveedor                        AS proveedor,
+        c.total_neto::float8                      AS total_neto,
+        c.estado_oc_id_esta                       AS id_estado,
+        e.descripcion                             AS estado,
+        c.centro_costo_id_ceco                    AS ceco_id,
+        /* texto listo para UI */
+        CASE WHEN cc.id_ceco IS NOT NULL
+          THEN (cc.codigo || ' — ' || cc.descripcion)
+          ELSE NULL
+        END                                       AS ceco_txt,
+        c.compania                                AS compania,
+        c.prioridad_orden                         AS prioridad,
+        c.sistema                                 AS sistema,
+        c.solicitante                             AS solicitante,
+        c.fecha_creacion                          AS fecha_creacion
       FROM doa2.cabecera_oc c
-      LEFT JOIN doa2.estado_oc e ON e.id_esta = c.estado_oc_id_esta
+      LEFT JOIN doa2.estado_oc e  ON e.id_esta = c.estado_oc_id_esta
+      LEFT JOIN doa2.centro_costo cc ON cc.id_ceco = c.centro_costo_id_ceco
     `;
 
+    // PENDIENTES: p.centrocosto puede ser id o código; resolvemos con LATERAL
     const basePend = `
       SELECT
-        'PENDIENTE'             AS fuente,
-        p.id_cabepen            AS id_cabecera,
-        p.numero_solicitud      AS numero_solicitud,
-        p.numero_orden_compra   AS numero_oc,
-        p.fecha_orden_compra    AS fecha_oc,
-        p.nombre_proveedor      AS proveedor,
-        p.total_neto::float8    AS total_neto,
-        p.estado_oc_id_esta     AS id_estado,
-        e.descripcion           AS estado,
-        NULL::bigint            AS id_ceco,
-        COALESCE(p.centrocosto,'')::text AS ceco_txt,
-        p.compania              AS compania,
-        p.prioridad_orden       AS prioridad,
-        p.sistema               AS sistema,
-        p.solicitante           AS solicitante,
-        p.fecha_creacion        AS fecha_creacion
+        'PENDIENTE'                               AS fuente,
+        p.id_cabepen                              AS id_cabecera,
+        p.numero_solicitud                        AS numero_solicitud,
+        p.numero_orden_compra                     AS numero_oc,
+        p.fecha_orden_compra                      AS fecha_oc,
+        p.nombre_proveedor                        AS proveedor,
+        p.total_neto::float8                      AS total_neto,
+        p.estado_oc_id_esta                       AS id_estado,
+        e.descripcion                             AS estado,
+        ccl.id_ceco                               AS ceco_id,
+        CASE WHEN ccl.id_ceco IS NOT NULL
+          THEN (ccl.codigo || ' — ' || ccl.descripcion)
+          ELSE NULL
+        END                                       AS ceco_txt,
+        p.compania                                AS compania,
+        p.prioridad_orden                         AS prioridad,
+        p.sistema                                 AS sistema,
+        p.solicitante                             AS solicitante,
+        p.fecha_creacion                          AS fecha_creacion
       FROM doa2.cabecera_oc_pendientes p
       LEFT JOIN doa2.estado_oc e ON e.id_esta = p.estado_oc_id_esta
+
+      /* LATERAL: intenta resolver por id (si es número) o por código (si no lo es) */
+      LEFT JOIN LATERAL (
+        SELECT cc.id_ceco, cc.codigo, cc.descripcion
+        FROM doa2.centro_costo cc
+        WHERE cc.estado_registro = 'A'
+          AND (
+               (p.centrocosto ~ '^[0-9]+$' AND cc.id_ceco = p.centrocosto::bigint)
+            OR (p.centrocosto !~ '^[0-9]+$' AND cc.codigo = p.centrocosto)
+          )
+        LIMIT 1
+      ) ccl ON TRUE
     `;
 
     const wrapUnion = `
@@ -101,31 +123,30 @@ router.get("/admin/oc", async (req, res) => {
     `;
 
     const wh = [];
-    if (!isEmpty(q)) {
+    if (q?.toString().trim()) {
       const p = `%${String(q).toUpperCase()}%`;
-      const p1 = push(p),
-        p2 = push(p),
-        p3 = push(p);
+      const p1 = push(p), p2 = push(p), p3 = push(p);
       wh.push(`(
         UPPER(oc.proveedor) LIKE ${p1}
         OR UPPER(oc.solicitante) LIKE ${p2}
         OR UPPER(COALESCE(oc.numero_oc,'')) LIKE ${p3}
       )`);
     }
-    if (!isEmpty(qOC)) wh.push(`COALESCE(oc.numero_oc,'') ILIKE ${push(`%${qOC}%`)}`);
-    if (!isEmpty(qSol)) wh.push(`COALESCE(oc.numero_solicitud,'') ILIKE ${push(`%${qSol}%`)}`);
-    if (!isEmpty(proveedor))
+    if (qOC?.toString().trim())   wh.push(`COALESCE(oc.numero_oc,'') ILIKE ${push(`%${qOC}%`)}`);
+    if (qSol?.toString().trim())  wh.push(`COALESCE(oc.numero_solicitud,'') ILIKE ${push(`%${qSol}%`)}`);
+    if (proveedor?.toString().trim())
       wh.push(`UPPER(oc.proveedor) LIKE ${push(`%${String(proveedor).toUpperCase()}%`)}`);
-    if (!isEmpty(ceco)) wh.push(`COALESCE(oc.id_ceco::text, oc.ceco_txt) = ${push(String(ceco))}`);
-    if (!isEmpty(compania)) wh.push(`COALESCE(oc.compania,'') = ${push(String(compania))}`);
-    if (!isEmpty(estado)) wh.push(`oc.id_estado::text = ${push(String(estado))}`);
-    if (!isEmpty(prioridad)) wh.push(`COALESCE(oc.prioridad,'') = ${push(String(prioridad))}`);
-    if (!isEmpty(sistema)) wh.push(`COALESCE(oc.sistema,'') = ${push(String(sistema))}`);
 
-    if (!isEmpty(fechaDesde))
-      wh.push(`COALESCE(oc.fecha_oc, oc.fecha_creacion) >= ${push(toYMD(fechaDesde))}`);
-    if (!isEmpty(fechaHasta))
-      wh.push(`COALESCE(oc.fecha_oc, oc.fecha_creacion) <= ${push(toYMD(fechaHasta))}`);
+    // 🔑 ahora filtramos por el ID RESUELTO
+    if (ceco?.toString().trim() && ceco !== '-1') wh.push(`oc.ceco_id::text = ${push(String(ceco))}`);
+
+    if (compania?.toString().trim()) wh.push(`COALESCE(oc.compania,'') = ${push(String(compania))}`);
+    if (estado?.toString().trim() && estado !== '-1') wh.push(`oc.id_estado::text = ${push(String(estado))}`);
+    if (prioridad?.toString().trim() && prioridad !== '-1') wh.push(`COALESCE(oc.prioridad,'') = ${push(String(prioridad))}`);
+    if (sistema?.toString().trim() && sistema !== '-1') wh.push(`COALESCE(oc.sistema,'') = ${push(String(sistema))}`);
+
+    if (fechaDesde?.toString().trim()) wh.push(`COALESCE(oc.fecha_oc, oc.fecha_creacion) >= ${push(toYMD(fechaDesde))}`);
+    if (fechaHasta?.toString().trim()) wh.push(`COALESCE(oc.fecha_oc, oc.fecha_creacion) <= ${push(toYMD(fechaHasta))}`);
 
     const WHERE = wh.length ? `WHERE ${wh.join(" AND ")}` : "";
 
