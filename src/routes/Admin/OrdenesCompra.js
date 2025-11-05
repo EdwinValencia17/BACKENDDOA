@@ -49,70 +49,72 @@ router.get("/admin/oc", async (req, res) => {
     };
 
     // ACTIVAS: resolvemos CC directo por id
-    const baseActivas = `
-      SELECT
-        'ACTIVA'                                  AS fuente,
-        c.id_cabe                                 AS id_cabecera,
-        c.numero_solicitud                        AS numero_solicitud,
-        c.numero_orden_compra                     AS numero_oc,
-        c.fecha_orden_compra                      AS fecha_oc,
-        c.nombre_proveedor                        AS proveedor,
-        c.total_neto::float8                      AS total_neto,
-        c.estado_oc_id_esta                       AS id_estado,
-        e.descripcion                             AS estado,
-        c.centro_costo_id_ceco                    AS ceco_id,
-        /* texto listo para UI */
-        CASE WHEN cc.id_ceco IS NOT NULL
-          THEN (cc.codigo || ' — ' || cc.descripcion)
-          ELSE NULL
-        END                                       AS ceco_txt,
-        c.compania                                AS compania,
-        c.prioridad_orden                         AS prioridad,
-        c.sistema                                 AS sistema,
-        c.solicitante                             AS solicitante,
-        c.fecha_creacion                          AS fecha_creacion
-      FROM doa2.cabecera_oc c
-      LEFT JOIN doa2.estado_oc e  ON e.id_esta = c.estado_oc_id_esta
-      LEFT JOIN doa2.centro_costo cc ON cc.id_ceco = c.centro_costo_id_ceco
-    `;
+   const baseActivas = `
+  SELECT
+    'ACTIVA'                                  AS fuente,
+    c.id_cabe                                 AS id_cabecera,
+    c.numero_solicitud                        AS numero_solicitud,
+    c.numero_orden_compra                     AS numero_oc,
+    c.fecha_orden_compra                      AS fecha_oc,
+    c.nombre_proveedor                        AS proveedor,
+    c.total_neto::float8                      AS total_neto,
+    c.estado_oc_id_esta                       AS id_estado,
+    e.descripcion                             AS estado,
+    c.centro_costo_id_ceco                    AS ceco_id,
+    c.observaciones                           AS observaciones,          -- ← unificado
+    /* texto listo para UI */
+    CASE WHEN cc.id_ceco IS NOT NULL
+      THEN (cc.codigo || ' — ' || cc.descripcion)
+      ELSE NULL
+    END                                       AS ceco_txt,
+    c.compania                                AS compania,
+    c.prioridad_orden                         AS prioridad,
+    c.sistema                                 AS sistema,
+    c.solicitante                             AS solicitante,
+    c.fecha_creacion                          AS fecha_creacion
+  FROM doa2.cabecera_oc c
+  LEFT JOIN doa2.estado_oc e  ON e.id_esta = c.estado_oc_id_esta
+  LEFT JOIN doa2.centro_costo cc ON cc.id_ceco = c.centro_costo_id_ceco
+`;
 
     // PENDIENTES: p.centrocosto puede ser id o código; resolvemos con LATERAL
     const basePend = `
-      SELECT
-        'PENDIENTE'                               AS fuente,
-        p.id_cabepen                              AS id_cabecera,
-        p.numero_solicitud                        AS numero_solicitud,
-        p.numero_orden_compra                     AS numero_oc,
-        p.fecha_orden_compra                      AS fecha_oc,
-        p.nombre_proveedor                        AS proveedor,
-        p.total_neto::float8                      AS total_neto,
-        p.estado_oc_id_esta                       AS id_estado,
-        e.descripcion                             AS estado,
-        ccl.id_ceco                               AS ceco_id,
-        CASE WHEN ccl.id_ceco IS NOT NULL
-          THEN (ccl.codigo || ' — ' || ccl.descripcion)
-          ELSE NULL
-        END                                       AS ceco_txt,
-        p.compania                                AS compania,
-        p.prioridad_orden                         AS prioridad,
-        p.sistema                                 AS sistema,
-        p.solicitante                             AS solicitante,
-        p.fecha_creacion                          AS fecha_creacion
-      FROM doa2.cabecera_oc_pendientes p
-      LEFT JOIN doa2.estado_oc e ON e.id_esta = p.estado_oc_id_esta
+  SELECT
+    'PENDIENTE'                               AS fuente,
+    p.id_cabepen                              AS id_cabecera,
+    p.numero_solicitud                        AS numero_solicitud,
+    p.numero_orden_compra                     AS numero_oc,
+    p.fecha_orden_compra                      AS fecha_oc,
+    p.nombre_proveedor                        AS proveedor,
+    p.total_neto::float8                      AS total_neto,
+    p.estado_oc_id_esta                       AS id_estado,
+    e.descripcion                             AS estado,
+    ccl.id_ceco                               AS ceco_id,
+    p.observaciones                           AS observaciones,          -- ← mismo alias que en ACTIVAS ✅
+    CASE WHEN ccl.id_ceco IS NOT NULL
+      THEN (ccl.codigo || ' — ' || ccl.descripcion)
+      ELSE NULL
+    END                                       AS ceco_txt,
+    p.compania                                AS compania,
+    p.prioridad_orden                         AS prioridad,
+    p.sistema                                 AS sistema,
+    p.solicitante                             AS solicitante,
+    p.fecha_creacion                          AS fecha_creacion
+  FROM doa2.cabecera_oc_pendientes p
+  LEFT JOIN doa2.estado_oc e ON e.id_esta = p.estado_oc_id_esta
 
-      /* LATERAL: intenta resolver por id (si es número) o por código (si no lo es) */
-      LEFT JOIN LATERAL (
-        SELECT cc.id_ceco, cc.codigo, cc.descripcion
-        FROM doa2.centro_costo cc
-        WHERE cc.estado_registro = 'A'
-          AND (
-               (p.centrocosto ~ '^[0-9]+$' AND cc.id_ceco = p.centrocosto::bigint)
-            OR (p.centrocosto !~ '^[0-9]+$' AND cc.codigo = p.centrocosto)
-          )
-        LIMIT 1
-      ) ccl ON TRUE
-    `;
+  /* LATERAL: intenta resolver por id (si es número) o por código (si no lo es) */
+  LEFT JOIN LATERAL (
+    SELECT cc.id_ceco, cc.codigo, cc.descripcion
+    FROM doa2.centro_costo cc
+    WHERE cc.estado_registro = 'A'
+      AND (
+           (p.centrocosto ~ '^[0-9]+$' AND cc.id_ceco = p.centrocosto::bigint)
+        OR (p.centrocosto !~ '^[0-9]+$' AND cc.codigo = p.centrocosto)
+      )
+    LIMIT 1
+  ) ccl ON TRUE
+`;
 
     const wrapUnion = `
       FROM (
@@ -187,9 +189,16 @@ router.get("/admin/oc", async (req, res) => {
 router.get("/admin/oc/:fuente/:id/detalle", async (req, res) => {
   try {
     const { fuente, id } = req.params;
-    let sql;
+    const ocId = Number(id);
+    if (!Number.isFinite(ocId)) {
+      return res.status(400).json({ ok: false, message: "ID inválido" });
+    }
+
+    let sqlDetalle;
+    let sqlTotales;
+
     if (fuente === "ACTIVA") {
-      sql = `
+      sqlDetalle = `
         SELECT
           d.id_deta,
           d.cabecera_oc_id_cabe,
@@ -210,8 +219,62 @@ router.get("/admin/oc/:fuente/:id/detalle", async (req, res) => {
         WHERE d.cabecera_oc_id_cabe = $1
         ORDER BY d.id_deta ASC
       `;
+
+      sqlTotales = `
+        WITH det AS (
+          SELECT
+            d.valor_sin_iva_descuento::float8 AS subtotal_item,
+            d.valor_iva::float8                AS iva_item,
+            d.valor_total::float8              AS total_item,
+            d.valor_descuento::float8          AS dcto_item
+          FROM doa2.detalle_oc d
+          WHERE d.cabecera_oc_id_cabe = $1
+        ),
+        sub AS (
+          SELECT
+            COALESCE(SUM(subtotal_item), 0) AS subtotal,
+            COALESCE(SUM(iva_item), 0)      AS valor_iva,
+            COALESCE(SUM(total_item), 0)    AS total_neto,
+            COALESCE(SUM(dcto_item), 0)     AS dcto_global
+          FROM det
+        ),
+        cab AS (
+          SELECT c.moneda
+          FROM doa2.cabecera_oc c
+          WHERE c.id_cabe = $1
+          LIMIT 1
+        ),
+        tc AS (
+          SELECT
+            cab.moneda,
+            (SELECT m.tasa_cambio
+               FROM doa2.moneda m
+              WHERE UPPER(m.codigo) = UPPER(cab.moneda)
+                AND m.estado_registro = 'A'
+              LIMIT 1) AS tc_cab,
+            (SELECT m2.tasa_cambio
+               FROM doa2.moneda m2
+              WHERE UPPER(m2.codigo) = 'USD'
+                AND m2.estado_registro = 'A'
+              LIMIT 1) AS tc_usd
+          FROM cab
+        )
+        SELECT
+          sub.subtotal,
+          sub.valor_iva,
+          sub.total_neto,
+          sub.dcto_global,
+          CASE
+            WHEN UPPER(COALESCE(tc.moneda,'')) = 'USD' THEN sub.subtotal
+            WHEN tc.tc_cab IS NOT NULL AND tc.tc_usd IS NOT NULL AND tc.tc_usd <> 0
+              THEN sub.subtotal * tc.tc_cab / tc.tc_usd
+            ELSE NULL
+          END AS subtotal_usd
+        FROM sub, tc
+      `;
     } else {
-      sql = `
+      // PENDIENTE
+      sqlDetalle = `
         SELECT
           d.id_deta_pendiente,
           d.id_cabepen,
@@ -231,14 +294,85 @@ router.get("/admin/oc/:fuente/:id/detalle", async (req, res) => {
         WHERE d.id_cabepen = $1
         ORDER BY d.id_deta_pendiente ASC
       `;
+
+      sqlTotales = `
+        WITH det AS (
+          SELECT
+            d.valor_sin_iva_descuento::float8 AS subtotal_item,
+            d.valor_iva::float8                AS iva_item,
+            d.valor_total::float8              AS total_item,
+            d.valor_descuento::float8          AS dcto_item
+          FROM doa2.detalle_oc_pendiente d
+          WHERE d.id_cabepen = $1
+        ),
+        sub AS (
+          SELECT
+            COALESCE(SUM(subtotal_item), 0) AS subtotal,
+            COALESCE(SUM(iva_item), 0)      AS valor_iva,
+            COALESCE(SUM(total_item), 0)    AS total_neto,
+            COALESCE(SUM(dcto_item), 0)     AS dcto_global
+          FROM det
+        ),
+        cab AS (
+          SELECT p.moneda
+          FROM doa2.cabecera_oc_pendientes p
+          WHERE p.id_cabepen = $1
+          LIMIT 1
+        ),
+        tc AS (
+          SELECT
+            cab.moneda,
+            (SELECT m.tasa_cambio
+               FROM doa2.moneda m
+              WHERE UPPER(m.codigo) = UPPER(cab.moneda)
+                AND m.estado_registro = 'A'
+              LIMIT 1) AS tc_cab,
+            (SELECT m2.tasa_cambio
+               FROM doa2.moneda m2
+              WHERE UPPER(m2.codigo) = 'USD'
+                AND m2.estado_registro = 'A'
+              LIMIT 1) AS tc_usd
+          FROM cab
+        )
+        SELECT
+          sub.subtotal,
+          sub.valor_iva,
+          sub.total_neto,
+          sub.dcto_global,
+          CASE
+            WHEN UPPER(COALESCE(tc.moneda,'')) = 'USD' THEN sub.subtotal
+            WHEN tc.tc_cab IS NOT NULL AND tc.tc_usd IS NOT NULL AND tc.tc_usd <> 0
+              THEN sub.subtotal * tc.tc_cab / tc.tc_usd
+            ELSE NULL
+          END AS subtotal_usd
+        FROM sub, tc
+      `;
     }
-    const { rows } = await pool.query(sql, [Number(id)]);
-    res.json({ ok: true, rows });
+
+    const [detRes, totRes] = await Promise.all([
+      pool.query(sqlDetalle, [ocId]),
+      pool.query(sqlTotales, [ocId]),
+    ]);
+
+    const trow = totRes.rows && totRes.rows[0];
+    const tot = trow
+      ? {
+          subTotal: Number(trow.subtotal ?? 0),
+          valorIva: Number(trow.valor_iva ?? 0),
+          totalNeto: Number(trow.total_neto ?? 0),
+          dctoGlobal: Number(trow.dcto_global ?? 0),
+          subtotalUSD: trow.subtotal_usd != null ? Number(trow.subtotal_usd) : null,
+        }
+      : null;
+
+    res.json({ ok: true, rows: detRes.rows, tot });
+     console.log(tot)
   } catch (err) {
     console.error("GET detalle OC error:", err);
     res.status(500).json({ ok: false, message: "Error obteniendo detalle" });
   }
 });
+
 
 /* ============================================================================
    GET /api/autorizaciones-solicitante/admin/oc/:fuente/:id/flujo

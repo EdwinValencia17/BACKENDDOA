@@ -510,6 +510,7 @@ router.get('/ordenes/:id', async (req, res) => {
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
 
   try {
+    // ===== CABECERA =====
     const cabQ = await pool.query(`
       SELECT
         c.id_cabe                     AS "id",
@@ -555,18 +556,18 @@ router.get('/ordenes/:id', async (req, res) => {
         c.requiere_poliza             AS "requierePoliza",
         c.requiere_contrato           AS "requiereContrato",
         c.estado_registro             AS "estadoRegistro",
-        c.envio_correo                AS "envioCorreo"
-        ,eo.descripcion               AS "estadoGeneral"
+        c.envio_correo                AS "envioCorreo",
+        eo.descripcion                AS "estadoGeneral"
       FROM doa2.cabecera_oc c
       LEFT JOIN doa2.centro_costo cc ON cc.id_ceco = c.centro_costo_id_ceco
       LEFT JOIN doa2.estado_oc    eo ON eo.id_esta = c.estado_oc_id_esta
       WHERE c.id_cabe = $1::bigint
       LIMIT 1
-    `,[id]);
-
+    `, [id]);
     if (!cabQ.rows.length) return res.status(404).json({ error: 'OC no encontrada' });
     const cab = cabQ.rows[0];
 
+    // ===== DETALLE =====
     const detQ = await pool.query(`
       SELECT
         d.id_deta                          AS "idDetalle",
@@ -589,32 +590,59 @@ router.get('/ordenes/:id', async (req, res) => {
         AND d.estado_registro = 'A'
       ORDER BY d.id_deta ASC
     `, [id]);
-
     const det = detQ.rows;
 
-    // Totales recalculados
-    let totalBruto=0, dctoGlobal=0, valorIva=0, subTotal=0, totalNeto=0;
+    // ===== TOTALES (recalcular) =====
+    let totalBruto = 0, dctoGlobal = 0, valorIva = 0, subTotal = 0, totalNeto = 0;
     for (const r of det) {
-      const c  = Number(r.cantidad || 0);
+      const c = Number(r.cantidad || 0);
       const vu = Number(r.valorUnitario || 0);
       const dP = Number(r.descuentoRef || 0) / 100;
       const iP = Number(r.ivaRef || 0) / 100;
       const bruto = vu * c;
-      const dcto  = bruto * dP;
+      const dcto = bruto * dP;
       const sinIvaDesc = bruto - dcto;
       const ivaVal = sinIvaDesc * iP;
-      const tot    = sinIvaDesc + ivaVal;
+      const tot = sinIvaDesc + ivaVal;
       totalBruto += bruto;
       dctoGlobal += dcto;
-      valorIva   += ivaVal;
-      subTotal   += sinIvaDesc;
-      totalNeto  += tot;
+      valorIva += ivaVal;
+      subTotal += sinIvaDesc;
+      totalNeto += tot;
+    }
+
+    // ===== SUBTOTAL USD (leyendo TRM) =====
+    // doa2.moneda: codigo (ej: 'USD','COP',...), tasa_cambio (COP por 1 unidad de esa moneda)
+    let subtotalUSD = null;
+    try {
+      const monQ = await pool.query(
+        `SELECT UPPER(TRIM(codigo)) AS codigo, COALESCE(tasa_cambio,0)::numeric AS tasa
+           FROM doa2.moneda
+          WHERE estado_registro='A'`
+      );
+      const rates = new Map(monQ.rows.map(r => [String(r.codigo).toUpperCase(), Number(r.tasa)]));
+      const cur = String(cab.moneda || 'COP').toUpperCase().trim();
+      const trmUSD = Number(rates.get('USD') || 0); // COP por USD
+      const trmCur = Number(rates.get(cur) || 0);   // COP por moneda de la OC
+
+      if (cur === 'USD') {
+        subtotalUSD = Number(subTotal);
+      } else if (cur === 'COP') {
+        subtotalUSD = trmUSD > 0 ? Number(subTotal) / trmUSD : null;
+      } else if (trmCur > 0 && trmUSD > 0) {
+        subtotalUSD = (Number(subTotal) * trmCur) / trmUSD;
+      } else {
+        subtotalUSD = null;
+      }
+    } catch (e) {
+      // no interrumpir si falla la lectura de tasas
+      subtotalUSD = null;
     }
 
     res.json({
       cabecera: cab,
       detalle: det,
-      totales: { totalBruto, dctoGlobal, subTotal, valorIva, totalNeto }
+      totales: { totalBruto, dctoGlobal, subTotal, valorIva, totalNeto, subtotalUSD }
     });
   } catch (e) {
     console.error('GET /bandeja-autorizacion/ordenes/:id', e);

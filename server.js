@@ -1,15 +1,15 @@
-import 'dotenv/config'
-import express from 'express'
-import cors from 'cors'
-import cookieParser from 'cookie-parser'
+// server.js
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
 
-// ── Rutas (igual que las tuyas) ─────────────────────────────────
+// Rutas existentes
 import companiasRouter from './src/routes/Solicitante/companias.js';
 import centroCostoRoutes from './src/routes/Solicitante/centroCostos.js';
 import estadoOcRoutes from './src/routes/Solicitante/EstadosOc.js';
 import cabeceraOCRoutes from './src/routes/Solicitante/cabeceraoc.js';
 import gestionarPersonasRoute from './src/routes/CatalogosOC/gestionarPersonas.js';
-import dashboardRouter from './src/routes/Home/dashboard.js';
 import monedasRouter from './src/routes/CatalogosOC/monedas.js';
 import homologacionRoutes from './src/routes/homologaciones.js';
 import historialAutorizacion from './src/routes/HistorialDeAutorizacion.js';
@@ -26,40 +26,33 @@ import bandejaJuridico from './src/routes/Legal/BandejaJuridico.js';
 import gestionarParametros from './src/routes/Gestiones/GestionarParametros.js';
 import gestionPermisoTemporales from './src/routes/Admin/GestionPermisoTemporales.js';
 import historialPermisosRouter from './src/routes/Admin/HistorialDepermisos.js';
-import ordenesCompraRouter from "./src/routes/Admin/OrdenesCompra.js";
+import ordenesCompraRouter from './src/routes/Admin/OrdenesCompra.js';
 import gestionTipoAutorizadorRouter from './src/routes/Gestiones/GestionTipoAutorizador.js';
-import gestionNivelesRouter from "./src/routes/Gestiones/GestionNiveles.js";
-import gestionCentroCostoRouter from "./src/routes/Gestiones/GestionCentroCosto.js"
-import gestionTipoPolizaRouter from "./src/routes/Gestiones/GestionDePoliza.js";
-import gestionMotivoRechazoRouter from "./src/routes/Gestiones/GestionMotivoRechazo.js";
-import gestionCategoriasRouter from "./src/routes/Gestiones/GestionCategorias.js";
+import gestionNivelesRouter from './src/routes/Gestiones/GestionNiveles.js';
+import gestionCentroCostoRouter from './src/routes/Gestiones/GestionCentroCosto.js';
+import gestionTipoPolizaRouter from './src/routes/Gestiones/GestionDePoliza.js';
+import gestionMotivoRechazoRouter from './src/routes/Gestiones/GestionMotivoRechazo.js';
+import gestionCategoriasRouter from './src/routes/Gestiones/GestionCategorias.js';
 import reglas from './src/routes/ReglasDeNegocio/ReglasDeNegocio.js';
 import authSeguridad from './src/routes/Home/auth.seguridadjci.js';
+import presupuestoRouter from './src/routes/Presupuesto/presupuesto.js';
+import { buildDashboardRouter } from './src/routes/Dashboard/dashboard.logic.js';
+
 
 const app = express();
-
-// ── Red y CORS ───────────────────────────────────────────────────
+// Network & CORS
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 3001);
 
-// Permite lista separada por comas. Ej: "http://10.4.55.81:5173,https://intranet.acme.com"
-const allowedOriginsList = (process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
-// RegEx para permitir todo el bloque 10.4.55.x (opcional, coméntalo si no quieres esto)
-const lanRegex = /^http:\/\/10\.4\.55\.\d{1,3}(:\d+)?$/;
-
+// (tu config actual: permitir todo origen)
 const corsOptions = {
-  origin: /.*/,           // 👈 permite TODO origen
+  origin: /.*/,
   credentials: true,
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   optionsSuccessStatus: 204,
 };
 
-
-app.set('trust proxy', 1); // útil si algún día usas proxy/ingress
+app.set('trust proxy', 1);
 
 // Middlewares base
 app.use(cors(corsOptions));
@@ -67,8 +60,7 @@ app.use(cookieParser());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-
-// SMTP check (no bloqueante)
+// SMTP check (best effort)
 ;(async () => {
   try {
     const t = createTransporter();
@@ -79,11 +71,10 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
   }
 })();
 
-// Healthcheck
+// Healthcheck global
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ── Rutas ────────────────────────────────────────────────────────
-app.use('/', dashboardRouter);
+// Rutas
 app.use('/api/companias', companiasRouter);
 app.use('/api/centros-costo', centroCostoRoutes);
 app.use('/api/estados-oc', estadoOcRoutes);
@@ -112,13 +103,17 @@ app.use('/api/gestion-motivo-rechazo', gestionMotivoRechazoRouter);
 app.use('/api/gestion-categorias', gestionCategoriasRouter);
 app.use('/api', authSeguridad);
 app.use('/api', reglas);
+app.use('/api', presupuestoRouter);
+app.use('/api/dashboard', buildDashboardRouter({ express }));
 
-// ── Arranque ─────────────────────────────────────────────────────
+
+// Arranque
 app.listen(PORT, HOST, () => {
   const local = `http://localhost:${PORT}`;
   const lan = process.env.API_PUBLIC_URL || `http://${HOST}:${PORT}`;
   console.log(`API arriba: ${local}`);
   console.log(`API LAN:   ${lan}`);
+
   try {
     if (typeof startSchedulers === 'function') {
       startSchedulers();

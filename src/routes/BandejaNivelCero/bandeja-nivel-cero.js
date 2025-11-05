@@ -52,9 +52,8 @@ const run = (clientOrPool, text, params = []) =>
 const runOne = async (clientOrPool, text, params = []) =>
   (await clientOrPool.query(text, params)).rows[0];
 
-// 👇 Agrega esto junto a tus helpers de IDs
+// 👇 (opcional) si luego quieres usarlo
 async function getNivelIdFlex(client, nivelTxt, tipoTxt) {
-  // 1) intentar por el nivel de la regla (p.ej. "45" o "4" o "DUENO CC")
   let id = await getIdByKey(
     client,
     `SELECT id_nive AS id FROM doa2.nivel WHERE estado_registro='A' AND TRIM(nivel)=TRIM($1)`,
@@ -62,7 +61,6 @@ async function getNivelIdFlex(client, nivelTxt, tipoTxt) {
   );
   if (id) return id;
 
-  // 2) fallback: si no hubo match, intenta con el "tipo" como nombre de nivel (p.ej. "GERENTE OPS")
   if (tipoTxt) {
     id = await getIdByKey(
       client,
@@ -390,8 +388,6 @@ router.get("/doa/po/ordenes", async (req, res) => {
   }
 });
 
-/* ========================= Detalle ========================= */
-// === Detalle (evita duplicados: si está iniciada, usa cabecera_oc + detalle_oc) ===
 /* ========================= Detalle ========================= */
 router.get("/doa/po/ordenes/:id", async (req, res) => {
   const id = Number(req.params.id);
@@ -912,7 +908,7 @@ async function evaluarReglasParaCabecera(idCabecera, client = pool) {
   if (!cab) return { ok: false, reason: "cabecera no encontrada" };
 
   const centroCosto  = U2(cab.centrocosto || "");
-  const compania     = S2(cab.compania || ""); // 👈 vuelve a declararse (solo informativa)
+  const compania     = S2(cab.compania || "");
   const monto        = Number(cab.total_neto || 0);
   const categoria    = U2(cab.categoria_nombre || "");
   const reglaNegocio = inferReglaNegocio(cab.categoria_nombre || "");
@@ -933,7 +929,6 @@ async function evaluarReglasParaCabecera(idCabecera, client = pool) {
       id: S2(r.id),
       reglaNegocio: U2(r.reglaNegocio || "INDIRECT"),
       centroCosto: U2(r.centroCosto),
-      // compania: S2(r.compania || ""), // (se puede dejar o quitar; NO se usa para filtrar)
       categoria: U2(r.categoria || ""),
       minExp: typeof r.minExp === "number" ? Number(r.minExp) : undefined,
       montoMax: Number(r.montoMax || 0),
@@ -947,11 +942,10 @@ async function evaluarReglasParaCabecera(idCabecera, client = pool) {
       r.vigente &&
       r.reglaNegocio === reglaNegocio &&
       r.centroCosto   === centroCosto &&
-      r.categoria     === categoria       // 👈 sin compañía
+      r.categoria     === categoria
     );
 
   if (!reglas.length) return { ok: false, reason: "no hay reglas para centro/categoría/regla" };
-
 
   const minMap = computeMinBounds2(reglas);
   const dentro = (r) => {
@@ -1002,6 +996,7 @@ async function evaluarReglasParaCabecera(idCabecera, client = pool) {
 }
 
 /* ======= Persistencia de flujo ======= */
+/** NOTA: Ya NO se usa lista_autorizaccion_persona. Solo crea pasos en lista_autorizaccion. */
 async function getIdByKey(client, sql, params) {
   const { rows } = await client.query(sql, params);
   return rows[0]?.id ?? null;
@@ -1032,15 +1027,6 @@ async function persistirFlujoAutorizacion({ client, idCabecera, centroCosto, apr
   const hasLista     = await hasTable('doa2','lista_autorizaccion', client);
   if (!hasLista) return { pasos: [], personas: [], note:'tabla lista_autorizaccion no existe' };
 
-  const hasListaPers = await hasTable('doa2','lista_autorizaccion_persona', client);
-  // detectar nombre real del FK en lista_autorizaccion_persona
-  let fkLapCol = 'id_liau';
-  if (hasListaPers) {
-    const hasIdLiau  = await hasColumn('doa2','lista_autorizaccion_persona','id_liau', client);
-    const hasIdLiaut = await hasColumn('doa2','lista_autorizaccion_persona','id_liaut', client);
-    fkLapCol = hasIdLiau ? 'id_liau' : (hasIdLiaut ? 'id_liaut' : 'id_liau');
-  }
-
   const hasColEstadoPasoLA = await hasColumn('doa2','lista_autorizaccion','estado_paso', client);
   const hasColOrdenLA      = await hasColumn('doa2','lista_autorizaccion','orden', client);
   const hasColEstadoOC_LA  = await hasColumn('doa2','lista_autorizaccion','estado_oc_id_esta', client);
@@ -1049,70 +1035,61 @@ async function persistirFlujoAutorizacion({ client, idCabecera, centroCosto, apr
   const idCentro = await getCentroId(client, centroCosto).catch(()=>null);
 
   const outPasos = [];
-  const outPers  = [];
+  const outPers  = []; // solo informativo (no se persiste)
 
   let ordenCalc = 0;
 
   /* =========================
    *  Paso 0: DUENO CC SIEMPRE
    * ========================= */
-   try {
-  // 0) Resolver el id del nivel DUEÑO CC: usa 11 si no lo encuentra
-  const NIVEL_ID_DUENO = 
-    (await getIdByKey(
-      client,
-      `SELECT id_nive AS id
-         FROM doa2.nivel
-        WHERE estado_registro='A'
-          AND UPPER(TRANSLATE(TRIM(nivel),'ÑÁÉÍÓÚÜ','NAEIOUSU')) IN ('DUENO CC','DUENO  CC','DUENOCC','DUENO DE CC','DUENO CENTRO','DUEÑO CC')
-        LIMIT 1`,
-      []
-    )) ?? 11;
+  try {
+    const NIVEL_ID_DUENO =
+      (await getIdByKey(
+        client,
+        `SELECT id_nive AS id
+           FROM doa2.nivel
+          WHERE estado_registro='A'
+            AND UPPER(TRANSLATE(TRIM(nivel),'ÑÁÉÍÓÚÜ','NAEIOUSU')) IN ('DUENO CC','DUENO  CC','DUENOCC','DUENO DE CC','DUENO CENTRO','DUEÑO CC')
+          LIMIT 1`,
+        []
+      )) ?? 11;
 
-  // 1) Centro del cabecera (por código)
-  const idCentro = await getCentroId(client, centroCosto).catch(() => null);
+    // Traemos posibles personas (solo para respuesta/log; no se guardan en ninguna tabla)
+    const params = [NIVEL_ID_DUENO];
+    let centroWhere = '';
+    if (idCentro) {
+      centroWhere = ` AND (a.centro_costo_id_ceco = $${params.push(idCentro)} OR a.centro_costo_id_ceco IS NULL)`;
+    } else {
+      centroWhere = ` AND a.centro_costo_id_ceco IS NULL`;
+    }
 
-  // 2) Traer personas de AUTORIZADOR (prioriza por centro; si no, globales)
-  const params = [NIVEL_ID_DUENO];
-  let centroWhere = '';
-  if (idCentro) {
-    centroWhere = ` AND (a.centro_costo_id_ceco = $${params.push(idCentro)} OR a.centro_costo_id_ceco IS NULL)`;
-  } else {
-    // si no resolvió centro, al menos permite globales
-    centroWhere = ` AND a.centro_costo_id_ceco IS NULL`;
-  }
+    await client.query(`SET LOCAL statement_timeout='30s'; SET LOCAL lock_timeout='5s';`);
+    const { rows: dueRows } = await client.query(
+      `
+      SELECT p.id_pers, p.nombre, p.email,
+             CASE WHEN a.centro_costo_id_ceco IS NULL THEN 1 ELSE 0 END AS prioridad
+        FROM doa2.autorizador a
+        JOIN doa2.persona p ON p.id_pers=a.persona_id_pers AND p.estado_registro='A'
+       WHERE a.estado_registro='A'
+         AND a.nivel_id_nive = $1
+         ${centroWhere}
+         AND (a.temporal IS NULL OR a.temporal <> 'S'
+              OR (now() BETWEEN COALESCE(a.fecha_inicio_temporal, now()) AND COALESCE(a.fecha_fin_temporal, now())))
+       ORDER BY prioridad ASC, p.nombre
+      `,
+      params
+    );
 
-  await client.query(`SET LOCAL statement_timeout='30s'; SET LOCAL lock_timeout='5s';`);
-  const { rows: dueRows } = await client.query(
-    `
-    SELECT p.id_pers, p.nombre, p.email,
-           CASE WHEN a.centro_costo_id_ceco IS NULL THEN 1 ELSE 0 END AS prioridad
-      FROM doa2.autorizador a
-      JOIN doa2.persona p ON p.id_pers=a.persona_id_pers AND p.estado_registro='A'
-     WHERE a.estado_registro='A'
-       AND a.nivel_id_nive = $1
-       ${centroWhere}
-       AND (a.temporal IS NULL OR a.temporal <> 'S'
-            OR (now() BETWEEN COALESCE(a.fecha_inicio_temporal, now()) AND COALESCE(a.fecha_fin_temporal, now())))
-     ORDER BY prioridad ASC, p.nombre
-    `,
-    params
-  );
-
-  if (dueRows.length) {
-    // 👉 Tipo en DUEÑO CC: explícitamente NULL (¡no GERENTE OPS!)
+    // Insert del paso (tipo NULL para DUEÑO CC)
     const cols = ['cabecera_oc_id_cabe','nivel_id_nive','estado_registro','fecha_creacion','oper_creador'];
     const vals = ['$1','$2',`'A'`,'NOW()','$3'];
     const args = [idCabecera, NIVEL_ID_DUENO, usuario];
 
-    // si resolvió centro, guárdalo
     if (idCentro) { cols.push('centro_costo_id_ceco'); vals.push('$'+(args.push(idCentro))); }
-    // orden / estado paso / estado_oc si existen
     if (hasColOrdenLA)      { cols.push('orden');             vals.push('$'+(args.push(++ordenCalc))); }
     if (hasColEstadoPasoLA) { cols.push('estado_paso');       vals.push(`'P'`); }
     if (hasColEstadoOC_LA)  { cols.push('estado_oc_id_esta'); vals.push('1'); }
 
-    // deja el tipo_autorizador_id_tiau como NULL a propósito
     cols.push('tipo_autorizador_id_tiau'); vals.push('NULL');
 
     const insPaso = await client.query(
@@ -1124,106 +1101,63 @@ async function persistirFlujoAutorizacion({ client, idCabecera, centroCosto, apr
     const idLista = insPaso.rows[0]?.id_liau;
     outPasos.push({ idLista, etapa: 'DUENO_CC', nivelId: NIVEL_ID_DUENO });
 
-    // personas del paso
-    if (hasListaPers && idLista) {
-      for (const r of dueRows) {
-        const rPer = await client.query(
-          `INSERT INTO doa2.lista_autorizaccion_persona
-             (${fkLapCol}, persona_id_pers, estado_registro, fecha_creacion, oper_creador)
-           VALUES ($1, $2, 'A', NOW(), $3)
-           ON CONFLICT DO NOTHING
-           RETURNING ${fkLapCol}`,
-          [idLista, Number(r.id_pers), usuario]
-        );
-        outPers.push({ idLista, idPersona: String(r.id_pers), nombre: r.nombre, created: !!rPer.rowCount });
-      }
+    // guardamos personas solo en la respuesta (no persiste en ninguna tabla)
+    for (const r of dueRows) {
+      outPers.push({ idLista, idPersona: String(r.id_pers), nombre: r.nombre, email: r.email });
     }
-  } else {
-    outPasos.push({ warn: 'DUEÑO CC: sin personas (ni por centro ni globales)', centroCosto, info: { idCentro } });
+  } catch (e) {
+    outPasos.push({ warn: 'DUEÑO CC: error insertando', error: String(e?.message || e) });
   }
-} catch (e) {
-  outPasos.push({ warn: 'DUEÑO CC: error insertando', error: String(e?.message || e) });
-}
 
   /* ==================================
    *  Resto de pasos (desde las REGLAS)
    * ================================== */
- for (const step of (aprobadores || [])) {
-  const idNivel = await getNivelId(client, step.nivel).catch(() => null); // requerido
-  const idTipo  = await getTipoId(client, step.tipo).catch(() => null);   // opcional
+  for (const step of (aprobadores || [])) {
+    const idNivel = await getNivelId(client, step.nivel).catch(() => null);
+    const idTipo  = await getTipoId(client, step.tipo).catch(() => null);
 
-  if (!idNivel) {
-    outPasos.push({ warn: 'No se resolvió id de nivel', step });
-    continue;
-  }
+    if (!idNivel) {
+      outPasos.push({ warn: 'No se resolvió id de nivel', step });
+      continue;
+    }
 
-  // armamos columnas y parámetros sin splice, para que $n siempre coincida
-  const cols = ['cabecera_oc_id_cabe'];
-  const vals = ['$1'];
-  const args = [idCabecera];
-  const addParam = (v) => '$' + (args.push(v));
+    const cols = ['cabecera_oc_id_cabe'];
+    const vals = ['$1'];
+    const args = [idCabecera];
+    const addParam = (v) => '$' + (args.push(v));
 
-  // tipo (si no hay, va NULL)
-  cols.push('tipo_autorizador_id_tiau');
-  vals.push(idTipo ? addParam(idTipo) : 'NULL');
+    cols.push('tipo_autorizador_id_tiau'); vals.push(idTipo ? addParam(idTipo) : 'NULL');
+    cols.push('nivel_id_nive');            vals.push(addParam(idNivel));
 
-  // nivel (requerido)
-  cols.push('nivel_id_nive');
-  vals.push(addParam(idNivel));
+    if (idCentro) { cols.push('centro_costo_id_ceco'); vals.push(addParam(idCentro)); }
+    if (hasColOrdenLA)      { cols.push('orden');             vals.push(addParam(++ordenCalc)); }
+    if (hasColEstadoPasoLA) { cols.push('estado_paso');       vals.push(`'P'`); }
+    if (hasColEstadoOC_LA)  { cols.push('estado_oc_id_esta'); vals.push('1'); }
 
-  // centro (si se resolvió)
-  if (idCentro) {
-    cols.push('centro_costo_id_ceco');
-    vals.push(addParam(idCentro));
-  }
+    cols.push('estado_registro'); vals.push(`'A'`);
+    cols.push('fecha_creacion');  vals.push('NOW()');
+    cols.push('oper_creador');    vals.push(addParam(usuario));
 
-  if (hasColOrdenLA) {
-    cols.push('orden');
-    vals.push(addParam(++ordenCalc));
-  }
-  if (hasColEstadoPasoLA) {
-    cols.push('estado_paso');
-    vals.push(`'P'`);
-  }
-  if (hasColEstadoOC_LA) {
-    cols.push('estado_oc_id_esta');
-    vals.push('1');
-  }
+    const insPaso = await client.query(
+      `INSERT INTO doa2.lista_autorizaccion (${cols.join(',')})
+       VALUES (${vals.join(',')})
+       RETURNING id_liau`,
+      args
+    );
 
-  // metadatos fijos
-  cols.push('estado_registro'); vals.push(`'A'`);
-  cols.push('fecha_creacion');  vals.push('NOW()');
-  cols.push('oper_creador');    vals.push(addParam(usuario));
+    const idLista = insPaso.rows[0]?.id_liau;
+    outPasos.push({ idLista, tipo: step.tipo, nivel: step.nivel });
 
-  const insPaso = await client.query(
-    `INSERT INTO doa2.lista_autorizaccion (${cols.join(',')})
-     VALUES (${vals.join(',')})
-     RETURNING id_liau`,
-    args
-  );
-
-  const idLista = insPaso.rows[0]?.id_liau;
-  outPasos.push({ idLista, tipo: step.tipo, nivel: step.nivel });
-
-  // personas del paso
-  if (hasListaPers && idLista && Array.isArray(step.personas) && step.personas.length) {
-    for (const per of step.personas) {
-      const rPer = await client.query(
-        `INSERT INTO doa2.lista_autorizaccion_persona
-           (${fkLapCol}, persona_id_pers, estado_registro, fecha_creacion, oper_creador)
-         VALUES ($1, $2, 'A', NOW(), $3)
-         ON CONFLICT DO NOTHING
-         RETURNING ${fkLapCol}`,
-        [idLista, Number(per.id), usuario]
-      );
-      outPers.push({ idLista, idPersona: per.id, nombre: per.nombre, created: !!rPer.rowCount });
+    // personas: solo informativo
+    if (Array.isArray(step.personas) && step.personas.length) {
+      for (const per of step.personas) {
+        outPers.push({ idLista, idPersona: per.id, nombre: per.nombre, email: per.email });
+      }
     }
   }
-}
 
-// ⬇️ aquí va el return y SOLO UNA llave para cerrar la función
-return { pasos: outPasos, personas: outPers };
-} 
+  return { pasos: outPasos, personas: outPers };
+}
 
 /* ========================= Iniciar ========================= */
 router.post("/doa/po/iniciar", async (req, res) => {
@@ -1539,7 +1473,7 @@ router.post("/doa/po/iniciar", async (req, res) => {
            WHERE id_cabepen=$1
         `, [id]);
 
-        // ---- Reglas y flujo
+        // ---- Reglas y flujo (sin lista_autorizaccion_persona)
         const evalOut = await evaluarReglasParaCabecera(idCabecera, client);
         if (evalOut.ok) {
           const persisted = await persistirFlujoAutorizacion({
@@ -1634,7 +1568,6 @@ router.get(['/doa/po/ordenes/:id/editar-permitido', '/doa/po/puede-editar/:id'],
     if (!p) return res.status(404).json({ error: 'OC pendiente no encontrada' });
 
     // ¿ya iniciada?
-    // Si existe la columna origen_pendiente_id la usamos; si no, validamos por número de OC.
     const hasOrigen = await hasColumn('doa2', 'cabecera_oc', 'origen_pendiente_id', pool);
     let iniciada = false;
 
@@ -1657,7 +1590,6 @@ router.get(['/doa/po/ordenes/:id/editar-permitido', '/doa/po/puede-editar/:id'],
     const tieneCentroCosto = !!p.cc;
     const permitido = !iniciada && tieneCentroCosto;
 
-    // Respuesta que espera el front
     return res.json({
       permitido,
       iniciada,

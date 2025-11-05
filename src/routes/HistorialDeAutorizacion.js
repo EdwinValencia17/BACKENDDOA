@@ -50,6 +50,10 @@ function buildWhere(q = {}) {
   const where = [];
   const params = [];
 
+  const isSet = (v) =>
+    v !== undefined && v !== null && String(v).trim() !== "" && String(v).trim() !== "-1";
+  const norm = (v) => (v ?? "").toString().trim();
+
   if (isSet(q.numeroOc)) {
     params.push(norm(q.numeroOc));
     where.push(`COALESCE(oc.numero_orden_compra, oc_lista.numero_orden_compra) = $${params.length}`);
@@ -75,13 +79,39 @@ function buildWhere(q = {}) {
     where.push(`nive.id_nive = $${params.length}`);
   }
   if (isSet(q.estado)) {
-    params.push(norm(q.estado)); // texto
-    where.push(`hiau.estado = $${params.length}`);
+    // Acepta 'APROBADO', 'APROBADA', 'RECHAZADO', etc.
+    const v = norm(q.estado).toUpperCase();
+    const canon =
+      v.startsWith('APROBAD') ? 'APROBADO' :
+      v.startsWith('RECHAZAD') ? 'RECHAZADO' :
+      v.startsWith('ANULAD') ? 'ANULADO' :
+      v.startsWith('PENDIENT') ? 'PENDIENTE' : v;
+    params.push(canon);
+    where.push(`UPPER(hiau.estado) = $${params.length}`);
   }
+
+  // === NUEVO: rango de fechas ===
+  // prioridad:
+  //   - si llega 'fecha' (igualdad), úsala tal cual (compatibilidad legacy)
+  //   - si llegan dateFrom/dateTo, aplica BETWEEN; si llega solo uno, aplica >= o <=
   if (isSet(q.fecha)) {
     params.push(norm(q.fecha)); // YYYY-MM-DD
     where.push(`hiau.fecha_creacion::date = $${params.length}::date`);
+  } else {
+    const hasFrom = isSet(q.dateFrom);
+    const hasTo   = isSet(q.dateTo);
+    if (hasFrom && hasTo) {
+      params.push(norm(q.dateFrom), norm(q.dateTo));
+      where.push(`hiau.fecha_creacion::date BETWEEN $${params.length-1}::date AND $${params.length}::date`);
+    } else if (hasFrom) {
+      params.push(norm(q.dateFrom));
+      where.push(`hiau.fecha_creacion::date >= $${params.length}::date`);
+    } else if (hasTo) {
+      params.push(norm(q.dateTo));
+      where.push(`hiau.fecha_creacion::date <= $${params.length}::date`);
+    }
   }
+
   if (isSet(q.nombreAuto)) {
     params.push(`%${norm(q.nombreAuto)}%`);
     where.push(`pers.nombre ILIKE $${params.length}`);
@@ -115,7 +145,9 @@ router.get("/", async (req, res) => {
     centroCosto,
     nivel,
     estado,
-    fecha,
+    fecha,       // igualdad (legacy)
+    dateFrom,    // NUEVO: rango
+    dateTo,      // NUEVO: rango
     nombreAuto,
   } = req.query;
 
@@ -135,6 +167,8 @@ router.get("/", async (req, res) => {
       nivel,
       estado,
       fecha,
+      dateFrom,   // pasa al builder
+      dateTo,     // pasa al builder
       nombreAuto,
     });
 
@@ -151,12 +185,10 @@ router.get("/", async (req, res) => {
       LEFT JOIN ${T.NIVE} nive     ON liau.nivel_id_nive = nive.id_nive
     `;
 
-    // total
     const countSQL = `SELECT COUNT(*) AS total ${baseFrom} ${whereSQL}`;
     const { rows: countRows } = await client.query(countSQL, params);
     const total = parseInt(countRows[0]?.total || "0", 10);
 
-    // data — MISMAS ALIAS QUE EL HQL/Oracle
     const dataSQL = `
       SELECT
         COALESCE(oc.id_cabe, oc_lista.id_cabe)                          AS idcabeceraoc,
@@ -167,7 +199,7 @@ router.get("/", async (req, res) => {
         liau.id_liau                                                     AS idliau,
 
         ceco.id_ceco                                                     AS idcentrocosto,
-        ceco.codigo                                                      AS nombrecentrocosto,   -- igual que legacy
+        ceco.codigo                                                      AS nombrecentrocosto,
         tiau.id_tiau                                                     AS idtipoautorizador,
         tiau.codigo                                                      AS nombretipoautorizador,
         nive.id_nive                                                     AS idnivel,
@@ -179,7 +211,7 @@ router.get("/", async (req, res) => {
              ELSE ' ' END                                               AS fechaautorizadorstr,
 
         hiau.observacion                                                 AS observaciones,
-        TO_CHAR(hiau.fecha_creacion, 'YYYY-MM-DD')                       AS fechaordenstring,    -- EXACTO al legacy
+        TO_CHAR(hiau.fecha_creacion, 'YYYY-MM-DD')                       AS fechaordenstring,
         pers.nombre                                                      AS nombreusuario
       ${baseFrom}
       ${whereSQL}
@@ -190,7 +222,6 @@ router.get("/", async (req, res) => {
     const dataParams = [...params, paging.limit, paging.offset * paging.limit];
     const { rows } = await client.query(dataSQL, dataParams);
 
-    // devolvemos tal cual (camelCase lo hace el front si quiere; aquí mantenemos legacy names)
     res.json({
       page: parseInt(page, 10) || 1,
       pageSize: paging.limit,

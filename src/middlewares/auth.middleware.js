@@ -8,11 +8,13 @@ export default function authMiddleware(req, res, next) {
   const h = req.headers.authorization || '';
   const [, token] = h.split(' '); // ["Bearer", "<token>"]
 
-  if (!token) return res.status(401).json({ ok: false, error: 'No autorizado' });
+  if (!token) {
+    return res.status(401).json({ ok: false, error: 'No autorizado' });
+  }
 
   try {
     const payload = jwt.verify(token, SECRET);
-    // payload: { sub, login, globalId, roles, role, iat, exp }
+    // payload esperado: { sub, login, globalId, personaId, roles[], role, iat, exp }
     req.user = payload;
     return next();
   } catch (e) {

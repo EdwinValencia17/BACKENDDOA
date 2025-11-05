@@ -229,6 +229,75 @@ router.get('/auth/me', authMiddleware, async (req, res) => {
   }
 });
 
+// ⬇️ pega esto ANTES del export default router;
+
+// --------------------------- POST /auth/refresh ---------------------------
+/**
+ * Estrategia pragmática:
+ * - Lee Authorization: Bearer <access>
+ * - Si el token aún es válido → emite uno nuevo (sliding).
+ * - Si está EXPIRADO → decodifica sin verificar (jwt.decode),
+ *   revalida el usuario en DB y emite uno nuevo.
+ * - Si no se puede resolver el login/usuario → 401.
+ *
+ * NOTA: Si luego quieres usar refresh token httpOnly, lo cambiamos fácil.
+ */
+router.post('/auth/refresh', async (req, res) => {
+  try {
+    const auth = String(req.headers.authorization || '');
+    const m = auth.match(/^Bearer\s+(.+)$/i);
+    if (!m) return res.status(401).json({ error: 'No autorizado' });
+    const oldToken = m[1];
+
+    let payload;
+    try {
+      // Si NO está expirado, verify funciona.
+      payload = jwt.verify(oldToken, SECRET);
+    } catch (e) {
+      // Si está expirado, decodificamos sin verificar (no confíes ciegamente).
+      payload = jwt.decode(oldToken);
+      // Si ni siquiera se puede decodificar, corta.
+      if (!payload) return res.status(401).json({ error: 'Token inválido' });
+    }
+
+    const login =
+      payload?.login ||
+      payload?.globalId ||
+      payload?.usrlogin ||
+      '';
+
+    if (!login) return res.status(401).json({ error: 'Token inválido' });
+
+    // Revalida el usuario en DB y su estado
+    const u = await getUserAndRoles(login);
+    if (!u) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (Number(u.estado) !== 1) return res.status(401).json({ error: 'Cuenta inactiva' });
+
+    // Puedes reconstruir claims frescos
+    const personaId = await getPersonaIdByLogin(u.usrlogin);
+    const role = pickPrimaryRole(u.roles || []);
+
+    const newToken = jwt.sign(
+      {
+        sub: String(u.usuarioid),
+        login: u.usrlogin,
+        globalId: u.usrlogin,
+        personaId: personaId ?? null,
+        roles: u.roles || [],
+        role,
+      },
+      SECRET,
+      { expiresIn: '2h' } // mismo TTL que /login (ajústalo si quieres)
+    );
+
+    return res.json({ token: newToken });
+  } catch (e) {
+    console.error('❌ /auth/refresh:', e);
+    return res.status(401).json({ error: 'Refresh inválido/expirado' });
+  }
+});
+
+
 /* ----------------------------- POST /logout ------------------------------ */
 router.post('/auth/logout', authMiddleware, async (_req, res) => {
   // Con JWT stateless basta con que el front borre el token.
