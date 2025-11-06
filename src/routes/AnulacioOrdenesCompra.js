@@ -31,8 +31,8 @@ router.get('/filtros/centros-costo', async (_req, res) => {
   })));
 });
 
-// Solicitantes (distintos desde cabecera_oc)
-router.get('/filtros/solicitantes', async (req, res) => {
+// Solicitantes
+router.get('/filtros/solicitantes', async (_req, res) => {
   try {
     const q = `
       SELECT DISTINCT TRIM(COALESCE(c.solicitante,'')) AS value,
@@ -49,8 +49,8 @@ router.get('/filtros/solicitantes', async (req, res) => {
   }
 })
 
-// Compañías (catálogo)
-router.get('/filtros/companias', async (req, res) => {
+// Compañías
+router.get('/filtros/companias', async (_req, res) => {
   try {
     const q = `
       SELECT co.id_compania::text AS value,
@@ -67,8 +67,8 @@ router.get('/filtros/companias', async (req, res) => {
   }
 })
 
-// Sistemas (distintos desde cabecera_oc)
-router.get('/filtros/sistemas', async (req, res) => {
+// Sistemas
+router.get('/filtros/sistemas', async (_req, res) => {
   try {
     const q = `
       SELECT DISTINCT TRIM(COALESCE(c.sistema,'')) AS value,
@@ -85,8 +85,8 @@ router.get('/filtros/sistemas', async (req, res) => {
   }
 })
 
-// Proveedores (NIT - Nombre) para diálogo
-router.get('/filtros/proveedores', async (req, res) => {
+// Proveedores (NIT - Nombre)
+router.get('/filtros/proveedores', async (_req, res) => {
   try {
     const q = `
       SELECT DISTINCT
@@ -108,8 +108,8 @@ router.get('/filtros/proveedores', async (req, res) => {
   }
 })
 
-// Motivos de rechazo (activos)
-router.get('/anulacion/motivos', async (req, res) => {
+// Motivos
+router.get('/anulacion/motivos', async (_req, res) => {
   try {
     const q = `
       SELECT id_more AS id, codigo, descripcion
@@ -128,9 +128,8 @@ router.get('/anulacion/motivos', async (req, res) => {
 /* ===================== Listado (DataTable) ===================== */
 /**
  * GET /anulacion/lista
- * Query params (opcionales): numeroSolicitud, numeroOc, centroCosto, solicitante, compania, sistema, proveedorNit,
- *   prioridad (G|I|N|P|U), fechaInicio, fechaFin, page, pageSize
- * Regla: mostrar OCs activas y no-anuladas (estado != 4)
+ * Query params: numeroSolicitud, numeroOc, centroCosto, solicitante, compania, sistema, proveedorNit,
+ * prioridad (G|I|N|P|U), fechaInicio, fechaFin, page, pageSize
  */
 router.get('/anulacion/lista', async (req, res) => {
   try {
@@ -152,7 +151,7 @@ router.get('/anulacion/lista', async (req, res) => {
     const params = [];
     const where = [
       `c.estado_registro = 'A'`,
-      `COALESCE(c.estado_oc_id_esta,0) <> 4` // excluir ANULADAS (ajusta si tu catálogo difiere)
+      `COALESCE(c.estado_oc_id_esta,0) <> 4`
     ];
 
     if (numeroSolicitud) {
@@ -164,29 +163,17 @@ router.get('/anulacion/lista', async (req, res) => {
       where.push(`c.numero_orden_compra ILIKE $${params.length}`);
     }
 
-    // 🔎 Si 'centroCosto' llega como ID, deja esto:
-  if (centroCosto && centroCosto !== '-1') {
-  params.push(String(centroCosto).trim());
-  where.push(`
-    EXISTS (
-      SELECT 1
-      FROM doa2.centro_costo ccf
-      WHERE c.centro_costo_id_ceco = ccf.id_ceco
-        AND TRIM(UPPER(ccf.codigo)) = TRIM(UPPER($${params.length}))
-    )
-  `);
-}
-    // 👉 Si prefieres filtrar por CÓDIGO en vez de ID, usa este bloque en su lugar:
-    // if (centroCosto && centroCosto !== '-1') {
-    //   params.push(centroCosto);
-    //   where.push(`
-    //     EXISTS (
-    //       SELECT 1
-    //       FROM doa2.centro_costo ccf
-    //       WHERE c.centro_costo_id_ceco = ccf.id_ceco
-    //         AND TRIM(ccf.codigo) = TRIM($${params.length})
-    //     )`);
-    // }
+    if (centroCosto && centroCosto !== '-1') {
+      params.push(String(centroCosto).trim());
+      where.push(`
+        EXISTS (
+          SELECT 1
+          FROM doa2.centro_costo ccf
+          WHERE c.centro_costo_id_ceco = ccf.id_ceco
+            AND TRIM(UPPER(ccf.codigo)) = TRIM(UPPER($${params.length}))
+        )
+      `);
+    }
 
     if (solicitante && solicitante !== '-1') {
       params.push(solicitante);
@@ -232,8 +219,15 @@ router.get('/anulacion/lista', async (req, res) => {
     const { rows: rc } = await pool.query(qCount, params);
     const total = Number(rc[0]?.total || 0);
 
-    // data
+    // ===== USD rate (la más reciente y activa) + datos =====
     const qData = `
+      WITH usd AS (
+        SELECT tasa_cambio
+        FROM doa2.moneda
+        WHERE UPPER(codigo) = 'USD' AND estado_registro = 'A'
+        ORDER BY COALESCE(fecha_modificacion, fecha_creacion) DESC
+        LIMIT 1
+      )
       SELECT
         c.id_cabe AS id,
         c.numero_solicitud AS "numeroSolicitud",
@@ -243,7 +237,6 @@ router.get('/anulacion/lista', async (req, res) => {
         c.nit_proveedor AS "proveedorNit",
         c.nombre_empresa AS "empresa",
 
-        -- ✅ Centro de costo: código, descripción y etiqueta combinada
         TRIM(cc.codigo) AS "centroCostoCodigo",
         COALESCE(TRIM(cc.descripcion),'') AS "centroCostoDescripcion",
         CASE
@@ -254,6 +247,11 @@ router.get('/anulacion/lista', async (req, res) => {
 
         c.prioridad_orden AS "prioridadOrden",
         c.total_neto AS "totalNeto",
+
+        -- ✅ Subtotal en COP y en USD (dividido por tasa USD)
+        c.sub_total AS "subTotal",
+        ROUND( c.sub_total / NULLIF((SELECT tasa_cambio FROM usd), 0), 2 ) AS "subTotalUsd",
+
         eo.descripcion AS "estado"
       FROM doa2.cabecera_oc c
       LEFT JOIN doa2.centro_costo cc ON cc.id_ceco = c.centro_costo_id_ceco
@@ -273,34 +271,101 @@ router.get('/anulacion/lista', async (req, res) => {
 
 
 /* ============== Flujo (lista_autorizaccion + historial) ============== */
-// GET /api/anulacion/orden/:id/flujo
 router.get('/anulacion/orden/:id/flujo', async (req, res) => {
   const id = Number(req.params.id);
-  if (!id) return res.status(400).json({ error: 'ID inválido' });
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, message: 'ID inválido' });
 
   try {
-    const q = `
+    const sql = `
       SELECT
-        ta.descripcion                           AS "tipoAutorizador",
-        n.descripcion                            AS "nivel",
-        COALESCE(cc.descripcion,'')              AS "centroCosto",
-        COALESCE(eoc.descripcion,'PENDIENTE')    AS "estado",
-        mr.descripcion                           AS "motivoRechazo",
-        la.observacion                           AS "observacion"
+        la.id_liau                                   AS id,
+        ta.codigo                                     AS tipo_autorizador,    -- usa "codigo" como en tu ruta OK
+        COALESCE(n.nivel, n.descripcion)              AS nivel,               -- toma nivel preferido
+        COALESCE(cc.codigo, cc.descripcion, '')       AS centro_costo,
+        COALESCE(eo.descripcion, 'PENDIENTE')         AS estado,
+        mr.descripcion                                AS motivo_rechazo,
+        la.observacion                                AS observacion,
+        asg.personas_asignadas                        AS personas
       FROM doa2.lista_autorizaccion la
-        LEFT JOIN doa2.tipo_autorizador ta ON ta.id_tiau = la.tipo_autorizador_id_tiau
-        LEFT JOIN doa2.nivel            n  ON n.id_nive  = la.nivel_id_nive
-        LEFT JOIN doa2.centro_costo     cc ON cc.id_ceco = la.centro_costo_id_ceco
-        LEFT JOIN doa2.estado_oc        eoc ON eoc.id_esta = la.estado_oc_id_esta
-        LEFT JOIN doa2.motivo_rechazo   mr ON mr.id_more  = la.motivo_rechazo_id_more
-      WHERE la.cabecera_oc_id_cabe = $1
-      ORDER BY la.id_liau
+      LEFT JOIN doa2.tipo_autorizador ta ON ta.id_tiau = la.tipo_autorizador_id_tiau
+      LEFT JOIN doa2.nivel n             ON n.id_nive  = la.nivel_id_nive
+      LEFT JOIN doa2.centro_costo cc     ON cc.id_ceco = la.centro_costo_id_ceco
+      LEFT JOIN doa2.estado_oc eo        ON eo.id_esta = la.estado_oc_id_esta
+      LEFT JOIN doa2.motivo_rechazo mr   ON mr.id_more = la.motivo_rechazo_id_more
+
+      /* Personas asignadas (tolerando NULL en tipo_autorizador y ceco) */
+      LEFT JOIN LATERAL (
+        WITH pers AS (
+          SELECT DISTINCT jsonb_build_object(
+            'id',     p.id_pers,
+            'nombre', NULLIF(TRIM(p.nombre), ''),
+            'correo', NULLIF(TRIM(p.email),  ''),   -- usa "correo" para que tu normalizador lo capte
+            'rol',    ta.codigo                     -- mostramos el mismo "tipo" del paso
+          ) AS pj
+          FROM doa2.autorizador a
+          JOIN doa2.persona p ON p.id_pers = a.persona_id_pers AND p.estado_registro = 'A'
+          WHERE a.estado_registro = 'A'
+            AND a.nivel_id_nive = la.nivel_id_nive
+            AND (
+                 (a.tipo_autorizador_id_tiau = la.tipo_autorizador_id_tiau)
+              OR (a.tipo_autorizador_id_tiau IS NULL AND la.tipo_autorizador_id_tiau IS NULL)
+            )
+            AND (
+                 a.centro_costo_id_ceco IS NULL
+              OR a.centro_costo_id_ceco = la.centro_costo_id_ceco
+            )
+            AND (
+                 COALESCE(a.temporal, 'N') = 'N'
+              OR (a.temporal = 'S' AND (CURRENT_DATE BETWEEN a.fecha_inicio_temporal AND a.fecha_fin_temporal))
+            )
+        )
+        SELECT COALESCE(
+          (SELECT json_agg(pj ORDER BY pj->>'nombre', pj->>'correo') FROM pers),
+          '[]'::json
+        ) AS personas_asignadas
+      ) asg ON TRUE
+
+      WHERE la.cabecera_oc_id_cabe = $1::bigint
+        AND la.estado_registro = 'A'
+
+      ORDER BY
+        CASE
+          WHEN UPPER(COALESCE(n.nivel,'')) = 'DUENO CC' THEN 0
+          WHEN ta.id_tiau IS NULL AND UPPER(COALESCE(n.nivel,'')) <> 'DUENO CC' THEN 1
+          WHEN ta.id_tiau IS NOT NULL AND COALESCE(n.nivel,'') ~ '^[0-9]+$' THEN 2
+          ELSE 3
+        END,
+        CASE
+          WHEN COALESCE(n.nivel,'') ~ '^[0-9]+$' THEN (n.nivel)::int
+          ELSE 9999
+        END,
+        ta.codigo NULLS LAST,
+        la.id_liau;
     `;
-    const { rows } = await pool.query(q, [id]);
-    return res.json(rows); // <-- El front espera un array de pasos
+
+    const { rows } = await pool.query(sql, [id]);
+
+    // Map a camelCase + 'aprobadores' (lo que consume tu expandible)
+    const data = rows.map((r, i) => ({
+      tipoAutorizador: r.tipo_autorizador || null,
+      nivel:           r.nivel || null,
+      centroCosto:     r.centro_costo || '',
+      estado:          r.estado || 'PENDIENTE',
+      motivoRechazo:   r.motivo_rechazo || null,
+      observacion:     r.observacion || null,
+      aprobadores:     Array.isArray(r.personas) ? r.personas.map(p => ({
+                         id: p.id,
+                         nombre: p.nombre,
+                         correo: p.correo,
+                         rol: p.rol
+                       })) : [],
+      __idx:           i
+    }));
+
+    return res.json(data);
   } catch (err) {
     console.error('GET /anulacion/orden/:id/flujo', err);
-    return res.status(500).json({ error: 'Error consultando flujo' });
+    return res.status(500).json({ ok: false, message: 'Error consultando flujo' });
   }
 });
 
@@ -310,13 +375,10 @@ router.get('/anulacion/orden/:id', async (req, res) => {
   if (!id) return res.status(400).json({ error: 'ID inválido' });
 
   try {
-    // 🔧 Trae la cabecera + código del centro de costo (cc.codigo)
-    //    y, si quieres, un texto de estado_general (mapea tus códigos reales).
     const qCab = `
       SELECT
         c.*,
-        TRIM(cc.codigo) AS centro_costo_codigo,                  -- ✅ AHORA VIENE EL CÓDIGO
-        -- 👇 opcional: mapea el estado general (ajusta números a tu catálogo real)
+        TRIM(cc.codigo) AS centro_costo_codigo,
         CASE c.estado_oc_id_esta
           WHEN 1 THEN 'INICIADO'
           WHEN 2 THEN 'EN PROCESO'
@@ -336,7 +398,6 @@ router.get('/anulacion/orden/:id', async (req, res) => {
       return res.status(404).json({ error: 'Orden no encontrada' });
     }
 
-    // Detalle
     const qDet = `
       SELECT
         d.id_deta                 AS "idDetalle",
@@ -360,7 +421,16 @@ router.get('/anulacion/orden/:id', async (req, res) => {
     `;
     const det = await pool.query(qDet, [id]);
 
-    // Totales desde cabecera
+    // 🔹 tasa USD (más reciente)
+    const { rows: rUsd } = await pool.query(`
+      SELECT tasa_cambio
+      FROM doa2.moneda
+      WHERE UPPER(codigo) = 'USD' AND estado_registro = 'A'
+      ORDER BY COALESCE(fecha_modificacion, fecha_creacion) DESC
+      LIMIT 1
+    `);
+    const tasaUsd = Number(rUsd[0]?.tasa_cambio || 0);
+
     const c = cab.rows[0];
     const totales = {
       totalBruto: Number(c.total_bruto ?? 0),
@@ -368,6 +438,9 @@ router.get('/anulacion/orden/:id', async (req, res) => {
       subTotal:   Number(c.sub_total ?? 0),
       valorIva:   Number(c.valor_iva ?? 0),
       totalNeto:  Number(c.total_neto ?? 0),
+      // ✅ Nuevo: subtotal en USD
+      subTotalUsd: tasaUsd > 0 ? Number((Number(c.sub_total ?? 0) / tasaUsd).toFixed(2)) : null,
+      tasaUsd
     };
 
     res.json({ cabecera: c, detalle: det.rows, totales });
@@ -521,7 +594,8 @@ router.patch('/anulacion/orden/:id/cabecera', async (req, res) => {
   }
 })
 
-// Flujo de aprobación (lista_autorizaccion + historial_autorizacion)
+// Flujo (forma adicional; mantenido por compatibilidad)
+// GET /api/anulacion/orden/:id/flujo  (REEMPLAZAR POR ESTA VERSIÓN)
 router.get('/anulacion/orden/:id/flujo', async (req, res) => {
   const id = Number(req.params.id);
   if (!id) return res.status(400).json({ success: false, message: 'ID inválido' });
@@ -530,31 +604,60 @@ router.get('/anulacion/orden/:id/flujo', async (req, res) => {
     const q = `
       SELECT
         la.id_liau,
-        ta.descripcion         AS tipo_autorizador,
-        n.descripcion          AS nivel,
-        cc.descripcion         AS centro_costo,
-        eoc.descripcion        AS estado,
-        mr.descripcion         AS motivo_rechazo,
-        la.observacion         AS observacion
+        ta.descripcion                              AS tipo_autorizador,
+        n.descripcion                               AS nivel,
+        COALESCE(cc.descripcion,'')                 AS centro_costo,
+        eoc.descripcion                             AS estado,
+        mr.descripcion                              AS motivo_rechazo,
+        la.observacion                              AS observacion,
+
+        -- 🔽 Personas configuradas para este paso (por terna tipo/nivel/ceco)
+        COALESCE(
+          (
+            SELECT json_agg(
+                     json_build_object(
+                       'id',    p.id_pers,
+                       'nombre', COALESCE(p.nombre,''),
+                       'correo', COALESCE(p.email,''),
+                       'rol',   COALESCE(ta2.descripcion, ta.descripcion, ''),
+                       -- Si no tienes estado por persona, puedes heredar el del paso:
+                       'estado', eoc.descripcion
+                     )
+                     ORDER BY p.nombre NULLS LAST
+                   )
+            FROM doa2.autorizador au
+            JOIN doa2.persona p      ON p.id_pers = au.persona_id_pers
+            LEFT JOIN doa2.tipo_autorizador ta2 ON ta2.id_tiau = au.tipo_autorizador_id_tiau
+            WHERE au.estado_registro = 'A'
+              AND p.estado_registro  = 'A'
+              AND au.tipo_autorizador_id_tiau = la.tipo_autorizador_id_tiau
+              AND au.nivel_id_nive            = la.nivel_id_nive
+              AND au.centro_costo_id_ceco     = la.centro_costo_id_ceco
+          ),
+          '[]'::json
+        ) AS aprobadores
+
       FROM doa2.lista_autorizaccion la
-        LEFT JOIN doa2.tipo_autorizador ta ON ta.id_tiau = la.tipo_autorizador_id_tiau
-        LEFT JOIN doa2.nivel            n  ON n.id_nive  = la.nivel_id_nive
-        LEFT JOIN doa2.centro_costo     cc ON cc.id_ceco = la.centro_costo_id_ceco
-        LEFT JOIN doa2.estado_oc        eoc ON eoc.id_esta = la.estado_oc_id_esta
-        LEFT JOIN doa2.motivo_rechazo   mr ON mr.id_more  = la.motivo_rechazo_id_more
+      LEFT JOIN doa2.tipo_autorizador ta ON ta.id_tiau = la.tipo_autorizador_id_tiau
+      LEFT JOIN doa2.nivel            n  ON n.id_nive  = la.nivel_id_nive
+      LEFT JOIN doa2.centro_costo     cc ON cc.id_ceco = la.centro_costo_id_ceco
+      LEFT JOIN doa2.estado_oc        eoc ON eoc.id_esta = la.estado_oc_id_esta
+      LEFT JOIN doa2.motivo_rechazo   mr ON mr.id_more  = la.motivo_rechazo_id_more
       WHERE la.cabecera_oc_id_cabe = $1
       ORDER BY la.id_liau
     `;
     const { rows } = await pool.query(q, [id]);
 
-    // Mapea al shape del front
-    const data = rows.map(r => ({
+    // 🔁 Shape amigable para el front (incluye aprobadores[])
+    const data = rows.map((r, idx) => ({
+      __idx: idx + 1, // útil como dataKey si quieres
       tipoAutorizador: r.tipo_autorizador,
-      nivel:          r.nivel,
-      centroCosto:    r.centro_costo,
-      estado:         r.estado,
-      motivoRechazo:  r.motivo_rechazo,
-      observacion:    r.observacion,
+      nivel:           r.nivel,
+      centroCosto:     r.centro_costo,
+      estado:          r.estado,
+      motivoRechazo:   r.motivo_rechazo,
+      observacion:     r.observacion,
+      aprobadores:     Array.isArray(r.aprobadores) ? r.aprobadores : [],
     }));
 
     res.json(data);

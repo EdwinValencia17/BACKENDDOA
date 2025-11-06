@@ -136,7 +136,7 @@ function requestMapperQAD(domain) {
       TargetApp: 'RUP',
       Interface: 'PURCHASE_ORDERS-RUP',
       Domain: String(domain),
-      SelectionCriteria: { COM_NMRO: "PO59771 " }
+      SelectionCriteria: { COM_NMRO: "PO59767 " }
     }
   }
 }
